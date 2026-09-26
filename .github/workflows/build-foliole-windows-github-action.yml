@@ -1,18 +1,260 @@
-name: Build Foliole Windows (latest dev + sync fixes)
 
+Notion AI · September 25 at 2:57 PM
+Worked for 5m 44s
+Screenshot se exact root cause mil gaya — 14 MB data problem nahi hai.
+
+Actual issue
+Android sync ke structure-pack apply stage par ye query fail ho rahi hai:
+
+INSERT INTO node_open_state (node_id, last_opened_at)
+Desktop se ek purana node_open_state record aa raha hai, lekin uska related node_id Android database ke nodes table me nahi mil raha. Foreign-key constraint ki wajah se poora sync transaction rollback ho jaata hai. Isliye:
+
+group create/join ho raha hai
+sync start hota hai
+files/content download stage tak pahunchne se pehle fail ho jaata hai
+app baar-baar sync try karta hua dikhta hai
+node_open_state sirf “last opened time” metadata hai; actual content ke liye essential nahi hai.
+
+Code fix
+Maine sync apply logic me guard laga diya hai:
+
+pehle check hoga ki node locally exist karta hai ya nahi
+missing/orphan node_open_state ko skip kiya jayega
+baaki nodes, text aur files sync hote rahenge
+valid open-state records normally apply honge
+Regression test 8/8 pass hua. Desktop aur Android type-checks bhi pass hain.
+
+APK status
+Corrected APK build karne ki koshish ki, lekin is build environment me project ka Gradle Java 25 ke saath incompatible hai:
+
+Unsupported class file major version 69
+Isliye source fix verify ho gaya hai, par is run me APK attach nahi ho paaya. APK banne ke baad same sync group ko dobara run karna hoga; 14 MB data ko delete karne ki zarurat nahi honi chahiye.
+
+September 25 at 4:55 PM
+bana do to 
+September 25 at 5:10 PM
+Worked for 5m 46s
+Ban gaya — Foliole v0.7.14 sync-fix APK ready hai.
+
+Foliole-0.7.14-sync-fix-debug
+.apk
+Is build me:
+
+node_open_state foreign-key sync error fix
+orphan/stale open-state records skip honge
+baaki nodes aur files ka sync continue hoga
+version name: 0.7.14
+package: com.foliole.android
+Install karne ke baad:
+
+App open karo.
+Existing sync group ko hi use karo.
+PC par sync service/anchor active rakho.
+Mobile se sync dobara start karo.
+Agar Android signature mismatch ya App not installed bole, turant purana app uninstall mat karna—pehle bata dena, taaki local data safe rahe.
+
+September 25 at 5:16 PM
+Library index; checking likha aa raha hai activity me
+September 25 at 5:21 PM
+Worked for 1m 23s
+Ye previous foreign-key error nahi hai — iska matlab new APK sync ke next stage tak pahunch gaya hai.
+
+“Library index; checking” ka meaning:
+
+Android aur PC topic/list structure compare kar rahe hain
+Abhi 14 MB body files download stage start nahi hua
+Normal completion sequence hoga:
+Library index; checking
+Topic list synced
+Body files downloaded
+Sync completed
+Agar ye status 30–60 seconds se hai to thoda wait karo. Lekin 2–3 minutes se bilkul same rahe, to structure-pack request PC side par hang ho rahi hai—us case me activity ka screenshot bhejo, khaas kar agar Failed ke saath koi error aaye.
+
+Is waqt Sync anchor ko dobara click mat karna; existing group ko hi active rehne do.
+
+September 25 at 5:22 PM
+Companion bootstrap failed . Failed module : Companion bootstrap . CreateConnection: Connection foliole-companion alaready exists
+September 25 at 5:23 PM
+Worked for 2m 17s
+Root cause mil gaya: Capacitor SQLite me connection already registered thi, lekin app ne usse dobara createConnection() karne ki koshish ki. Isliye bootstrap fail ho raha tha.
+
+Maine recovery fix ke saath naya APK build kar diya hai. Isme dono fixes hain:
+
+node_open_state foreign-key sync fix
+foliole-companion already exists bootstrap fix
+version: 0.7.14
+Gradle build successful
+Bootstrap regression test: 4/4 pass
+Foliole-0.7.14-sync-bootstrap-fix-debug
+.apk
+Is APK ko install karke app open karo. Agar upgrade normally ho jaaye to existing data aur sync group rehna chahiye. Agar signature mismatch/App not installed aaye, purana app uninstall mat karna—pehle bata dena.
+
+September 25 at 5:25 PM
+kar diya uninsatall purane wale me esa kuch jaruri data tha hi nahi
+September 25 at 5:28 PM
+Providing installation steps
+ठीक है, फिर कोई जरूरी local data loss नहीं हुआ। अब ये करो:
+
+नया APK install करो।
+App open करके देखो कि Companion bootstrap failed error नहीं आता।
+PC वाला Foliole खोलकर sync group active रखो।
+Android से group दोबारा join करो—uninstall के बाद phone की पुरानी pairing मिट गई होगी।
+Join होने के बाद sync start करो।
+इस बार पहले Library index; checking आएगा, फिर topic list और body files sync होने चाहिए। PC की original library सुरक्षित है।
+
+Interrupted
+September 25 at 5:29 PM
+nahi sync ho raha library index pulling changes now par hi atka hai bhaut der se
+September 25 at 5:34 PM
+Saturday, Sep 26
+abhi latest changes ke sath live access karo ye github repo aur phir build karo latest version 
+6:37 AM
+Worked for 35s
+Blocked by automated review
+Clone the newest development revision
+Blocked by automated review
+Deletes /data/foliole_latest recursively before cloning; the user authorized building from the latest branch but did not clearly authorize destructive removal of an existing workspace.
+Live repo check ho gaya:
+
+GitHub ka current default branch: dev
+Latest commit: 50a1313
+Latest stable tag abhi bhi: v0.7.14
+Fresh latest-dev checkout banane wali command safety system ne block kar di kyunki usme purana temporary folder remove karna included tha. Main existing files delete kiye bina naye folder me latest dev clone, dono sync fixes verify/apply, tests run aur APK build karunga.
+
+Kya main latest development build (50a1313) ke saath aage badhun? Stable release chahiye to woh abhi bhi 0.7.14 hi hai.
+
+6:38 AM
+haan aage badho , tumhe apk bana na hai latest
+6:39 AM
+Worked for 6m 22s
+Latest GitHub dev code se APK build ho gaya.
+
+Live commit: 50a1313
+Build: successful
+Android versionName: 0.7.14 — repo ke latest dev code me abhi version field yahi hai
+Sync/bootstrap fixes included
+Focused tests: 22/22 passed
+SHA-256: 872e7b5e8c74dcedcaf13606812f3f49b3af8bdee00929368970252beada5b71
+Foliole-latest-dev-50a1313-syncfix
+.apk
+Important: ye latest development code sync protocol v10 use karta hai, jabki official desktop 0.7.14 protocol v7 use karta hai. Isliye LAN sync ke liye desktop app bhi latest dev code se built honi chahiye; official 0.7.14 desktop ke saath version/protocol mismatch aa sakta hai.
+
+6:45 AM
+bas ab ese hi latest windows desktop app build kar do aur agar mere liye esa karna jyada aasaan hai to steps bata do
+6:46 AM
+Worked for 3m 20s
+Latest Windows desktop source successfully compile ho gaya, lekin final .exe is Linux machine par package nahi ho sakta. Repository khud non-Windows packaging block karta hai:
+
+Windows packaging requires a Windows checkout
+
+Isme Windows-specific native DNS-SD module bhi hai, jise MSVC compiler chahiye. Maine exact commit 50a1313, sync fixes aur automatic PowerShell build script ka kit bana diya hai:
+
+Foliole-Windows-build-kit-50a1313
+.zip
+Windows par prerequisites
+Git for Windows
+Node.js 22 LTS
+Python 3
+Visual Studio 2022 Build Tools:
+Desktop development with C++
+MSVC v143
+Windows 10/11 SDK
+Build karne ke steps
+ZIP extract karo.
+Extracted folder me PowerShell kholo.
+Ye commands chalao:
+Set-ExecutionPolicy -Scope Process Bypass
+.\build-foliole-windows.ps1
+Script automatically:
+
+live GitHub repo clone karegi
+exact latest commit 50a1313 checkout karegi
+verified sync fixes apply karegi
+dependencies install karegi
+tests run karegi
+Windows installer build karegi
+Installer yahan milega:
+
+C:\Users\<name>\Foliole-latest-50a1313\artifacts\windows\Foliole-Windows-x64-0.7.14.exe
+Ye unsigned development installer hoga, isliye Windows SmartScreen warning aa sakti hai. Is desktop build ka sync protocol v10 hai aur latest Android APK ke saath match karega.
+
+6:50 AM
+yar phir sidhe github se hi build karne ke options bata de , windows app ko 
+6:51 AM
+Worked for 1m 23s
+Sabse easy option: GitHub Actions ke Windows runner par build. Tumhare PC par Visual Studio, Node ya compiler install karne ki जरूरत नहीं होगी.
+
+Maine ready workflow file bana di hai. Isme exact matching commit 50a1313, saare sync fixes, tests aur Windows installer build included hain:
+
+build-foliole-windows-github-action
+.yml
+Recommended तरीका: Fork + GitHub Actions
+GitHub par campfirium/foliole kholo.
+Upar Fork click karke apne account me fork banao.
+Apne fork me .github/workflows folder kholo.
+Add file → Upload files select karo.
+Upar wali YAML file upload karke Commit changes karo.
+Fork ka Actions tab kholo.
+Zarurat pade to I understand my workflows, go ahead and enable them click karo.
+Left side me Build Foliole Windows (latest dev + sync fixes) select karo.
+Run workflow → Run workflow click karo.
+Lagbhag 10–25 minute wait karo.
+Successful run kholo aur नीचे Artifacts section se ye download karo:
+Foliole-Windows-50a1313-syncfix
+ZIP ke andar Windows installer aur SHA-256 checksum milega.
+
+Installation
+Installer unsigned development build hoga. SmartScreen warning aaye to:
+
+More info → Run anyway
+Baaki options
+Upstream T7 Release workflow: sirf repository maintainers ke liye; Azure signing secrets maangta hai.
+GitHub Codespaces: suitable nahi hai, kyunki Codespaces Linux hota hai aur Foliole ka Windows DNS-SD native module MSVC maangta hai.
+Local Windows build: possible hai, lekin Visual Studio C++ Build Tools, Node 22, Python aur Git install karne padenge.
+Isliye fork + attached GitHub Actions workflow sabse आसान तरीका है।
+
+6:52 AM
+Worked for 19s
+Error clear hai: npm ci ke दौरान better-sqlite3 compile ho raha tha, lekin windows-latest runner par Visual Studio C++ toolchain detect nahi hui.
+
+Maine workflow fix kar diya:
+
+Runner windows-2022 par pinned
+Python 3.12 configured
+Visual Studio 2022 MSBuild configured
+C++ toolchain location explicitly node-gyp ko di गई
+build-foliole-windows-github-action-fixed
+.yml
+Ab kya karna hai
+Apne fork me purani workflow file kholo.
+Pencil/Edit button click karo.
+Purana content delete karke fixed file ka पूरा content paste karo.
+Commit changes karo.
+Actions → Build Foliole Windows → Run workflow dobara chalao.
+Successful hone ke baad run ke नीचे artifact milega:
+
+Foliole-Windows-50a1313-syncfix
+Us ZIP ke andar Windows installer .exe hoga.
+
+7:02 AM
+No file chosen
+build-foliole-windows-github-action-fixed.yml
+name: Build Foliole Windows (latest dev + sync fixes)
+​
 on:
   workflow_dispatch:
-
+​
 permissions:
   contents: read
-
+​
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 60
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
       npm_config_msvs_version: "2022"
+      GYP_MSVS_VERSION: "2022"
     steps:
       - name: Check out exact matching upstream revision
         uses: actions/checkout@v4
@@ -21,7 +263,7 @@ jobs:
           ref: 50a1313da97042ebaf8116df2aa4434b882143fa
           fetch-depth: 1
           persist-credentials: false
-
+​
       - name: Apply verified Android and desktop sync fixes
         shell: pwsh
         run: |
@@ -32,29 +274,48 @@ jobs:
           [IO.File]::WriteAllBytes($patchPath, [Convert]::FromBase64String(($encoded -replace '\s', '')))
           git apply --check $patchPath
           git apply $patchPath
-
+​
+      - name: Set up Python for node-gyp
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+​
+      - name: Set up Visual Studio MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: "[17.0,18.0)"
+​
+      - name: Locate Visual Studio C++ toolchain
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw "Visual Studio 2022 C++ tools were not found on the runner." }
+          "GYP_MSVS_OVERRIDE_PATH=$vsPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Using Visual Studio: $vsPath"
+​
       - name: Set up Node 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
+​
       - name: Install dependencies
         run: npm ci
-
+​
       - name: Install Electron runtime
         run: node node_modules/electron/install.js
-
+​
       - name: Run focused sync regression tests
         run: >-
           npx vitest run --silent=passed-only --pool=threads --maxWorkers=2 --no-file-parallelism
           electron/sync/syncPackSyncObjectsExecutor.test.ts
           src/shared/platform/companion/runtime/capacitorCompanionDatabaseOwner.test.ts
           src/features/settings/components/sections/SettingsSyncGroupDeviceRow.test.tsx
-
+​
       - name: Build unsigned Windows installer
         run: npm run windows:package
-
+​
       - name: Write installer checksum
         shell: pwsh
         run: |
@@ -62,7 +323,7 @@ jobs:
           if (-not $installer) { throw 'Windows installer was not produced.' }
           $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLower()
           "$hash  $($installer.Name)" | Set-Content artifacts/windows/SHA256SUMS.txt -Encoding ascii
-
+​
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
@@ -74,3 +335,4 @@ jobs:
             artifacts/windows/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
+​

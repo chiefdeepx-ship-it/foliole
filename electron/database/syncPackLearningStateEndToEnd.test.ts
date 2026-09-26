@@ -24,6 +24,7 @@ import { applySyncPackNodeSurfaceWithDbPort } from '../../lib/core/sync/syncPack
 
 import { createBetterSqliteDbPort } from './betterSqliteDbPort.js';
 import { closeDatabaseConnection, openDatabaseConnection } from './connection.js';
+import { flushNodeSyncVersionWithDriver } from './nodeSyncVersionFromDriver.js';
 import { buildDesktopSyncPack } from './syncPackBuilder.js';
 
 let tempRoot = '';
@@ -52,7 +53,7 @@ it('builds and applies a desktop learning-state pack after its node row', async 
       applied: true,
       appliedObjectCount: 2,
       fromStateSeq: 0,
-      toStateSeq: 2
+      toStateSeq: 3
     });
   } finally {
     await port.run('DETACH DATABASE inc');
@@ -84,7 +85,7 @@ it('prunes packed learning rows for live children hidden under deleted parents',
     })).resolves.toMatchObject({
       applied: true,
       fromStateSeq: 0,
-      toStateSeq: 3
+      toStateSeq: 5
     });
   } finally {
     await port.run('DETACH DATABASE inc');
@@ -94,12 +95,18 @@ it('prunes packed learning rows for live children hidden under deleted parents',
     deleted_at: null,
     parent_id: 'deleted-parent'
   });
+  expect(target.sqlite.prepare('SELECT deleted_at FROM nodes WHERE id = ?').get('deleted-parent')).toEqual({
+    deleted_at: '2026-05-06T10:10:00.000Z'
+  });
   expect(target.sqlite.prepare('SELECT node_id FROM node_reading WHERE node_id = ?').get('hidden-child')).toBeUndefined();
 });
 
 async function buildLearningOnlyDesktopPack() {
   mockedAppDataDir = path.join(tempRoot, 'source-app-data');
-  initializeDatabaseConnection(openDatabaseConnection());
+  const connection = openDatabaseConnection();
+  initializeDatabaseConnection(connection);
+  connection.driver.execute("INSERT INTO settings (key, value, updated_at) VALUES ('host_name', ?, ?)",
+    ['"desktop-source"', '2026-05-06T10:00:00.000Z']);
   insertSourceLearningState();
   const packPath = path.join(tempRoot, 'desktop-learning-only.syncpack');
   await buildDesktopSyncPack({
@@ -116,8 +123,12 @@ async function buildLearningOnlyDesktopPack() {
 
 async function buildHiddenChildLearningDesktopPack() {
   mockedAppDataDir = path.join(tempRoot, 'hidden-source-app-data');
-  initializeDatabaseConnection(openDatabaseConnection());
+  const connection = openDatabaseConnection();
+  initializeDatabaseConnection(connection);
+  connection.driver.execute("INSERT INTO settings (key, value, updated_at) VALUES ('host_name', ?, ?)",
+    ['"desktop-source"', '2026-05-06T11:00:00.000Z']);
   insertHiddenChildLearningState();
+  flushNodeSyncVersionWithDriver(connection.driver, 'hidden-child', 'desktop-source', '2026-05-06T10:05:00.000Z');
   const packPath = path.join(tempRoot, 'desktop-hidden-child-learning.syncpack');
   await buildDesktopSyncPack({
     createdAt: '2026-05-06T11:00:00.000Z',

@@ -1,4 +1,5 @@
 import { isDesktopSyncGroupPlatform } from '../../lib/platform/syncGroupPlatform.js';
+import { runWithDatabaseConnectionOwner } from '../database/connection.js';
 import { isDesktopSyncGroupDeviceBlocked } from '../database/syncGroupMemberStateStore.js';
 import { loadDesktopSyncGroup } from '../database/syncGroupStore.js';
 
@@ -11,10 +12,11 @@ import {
 import { isDesktopCompanionSyncParticipating } from './desktopCompanionSyncPreference.js';
 import type { DesktopDnsSdSession } from './desktopDnsSd.js';
 import { updateDesktopSyncFreshness } from './desktopMemberSyncCadence.js';
-import { runDesktopSyncCoordinator } from './desktopSyncCoordinator.js';
+import { runDesktopSyncCoordinator, subscribeDesktopSyncCompleted } from './desktopSyncCoordinator.js';
 import { discoverDesktopSyncGroups } from './desktopSyncGroupDiscovery.js';
 import {
   exchangeAllDesktopSyncGroupMemberStates,
+  loadDesktopSyncGroupMemberEndpoints,
   startDesktopSyncGroupMemberStateSession
 } from './desktopSyncGroupMemberStateSession.js';
 import { notifyDesktopSyncGroupOverviewChanged } from './desktopSyncGroupOverviewNotifier.js';
@@ -26,9 +28,11 @@ import {
   saveDesktopSyncGroupRoute,
   type DesktopSyncGroupPeer
 } from './desktopSyncGroupRoutes.js';
+import { continuePendingReadwiseHandoff } from './readwiseOwnerHandoff.js';
 
 let runtime: DesktopDnsSdSession | null = null;
 let memberStateRuntime: DesktopDnsSdSession | null = null;
+let stopReadwiseContinuation: (() => void) | null = null;
 let manualRun: Promise<unknown> | null = null;
 const inFlight = new Map<string, Promise<boolean>>();
 
@@ -36,6 +40,7 @@ export function startDesktopSyncGroupAutoSync() {
   if (!isDesktopCompanionSyncParticipating() || runtime) return;
   const group = loadDesktopSyncGroup();
   if (!group) return;
+  stopReadwiseContinuation = subscribeDesktopSyncCompleted(resumeReadwiseHandoff);
   runtime = startDesktopAnchorTopologySession({
     group,
     onAnchor: (target, requireSyncBeforeDemote) => (
@@ -55,7 +60,7 @@ export function startDesktopSyncGroupAutoSync() {
   });
   memberStateRuntime = startDesktopSyncGroupMemberStateSession(
     group,
-    () => notifyDesktopSyncGroupOverviewChanged(),
+    () => { notifyDesktopSyncGroupOverviewChanged(); resumeReadwiseHandoff(); },
     (peer) => activateMemberRoute(group, peer),
     (deviceId) => {
       removeDesktopSyncGroupRoute(deviceId);
@@ -67,12 +72,20 @@ export function startDesktopSyncGroupAutoSync() {
 }
 
 export function stopDesktopSyncGroupAutoSync() {
+  stopReadwiseContinuation?.();
+  stopReadwiseContinuation = null;
   runtime?.stop();
   runtime = null;
   memberStateRuntime?.stop();
   memberStateRuntime = null;
   clearDesktopSyncGroupRoutes();
   updateDesktopSyncFreshness(false);
+}
+
+function resumeReadwiseHandoff() {
+  void continuePendingReadwiseHandoff().then((result) => {
+    if (result?.is_active) notifyDesktopSyncGroupOverviewChanged();
+  }).catch((error) => console.info('[readwise] handoff remains pending', error));
 }
 
 export function runDesktopManualSyncWithDiscovery() {
@@ -101,12 +114,18 @@ function resumeMobileGuideRoute(route: DesktopSyncGroupPeer) {
 }
 
 async function runDesktopManualSync() {
-  const group = loadDesktopSyncGroup();
+  const group = await runWithDatabaseConnectionOwner(() => loadDesktopSyncGroup());
   if (!group) return runDesktopSyncCoordinator('manual');
   await exchangeAllDesktopSyncGroupMemberStates();
   if (loadDesktopAnchorTopologyState().role === 'anchor') {
-    return loadDesktopSyncGroupRoutes(group.group_id).some((route) => route.route_kind === 'member')
-      ? runDesktopSyncCoordinator('manual') : null;
+    const memberRoutes = loadDesktopSyncGroupRoutes(group.group_id)
+      .filter((route) => route.route_kind === 'member');
+    for (const peer of loadDesktopSyncGroupMemberEndpoints(group.group_id)) {
+      if (peer.route_kind !== 'member' || !isDesktopSyncGroupPlatform(peer.peer_platform)) continue;
+      if (memberRoutes.some((route) => route.peer_device_id === peer.peer_device_id)) continue;
+      memberRoutes.push(saveDesktopSyncGroupRoute(peer));
+    }
+    return memberRoutes.length ? runDesktopSyncCoordinator('manual') : null;
   }
   const current = loadDesktopSyncGroupRoutes(group.group_id)[0];
   if (current) return runDesktopSyncCoordinator('manual', current);
@@ -115,7 +134,7 @@ async function runDesktopManualSync() {
     && value.provider_device_id !== group.local_device_identity_key
     && !['android-capacitor', 'ios-capacitor'].includes(value.provider_platform.toLowerCase()));
   if (!candidate) return runDesktopSyncCoordinator('manual');
-  const route = routeFromCandidate(group, candidate);
+  const route = await runWithDatabaseConnectionOwner(() => routeFromCandidate(group, candidate));
   if (!route) return runDesktopSyncCoordinator('manual');
   saveDesktopSyncGroupRoute(route);
   try {
@@ -125,7 +144,7 @@ async function runDesktopManualSync() {
   }
 }
 
-function activateAnchorRoute(
+async function activateAnchorRoute(
   group: NonNullable<ReturnType<typeof loadDesktopSyncGroup>>,
   target: DesktopAnchorTarget,
   requireSyncBeforeDemote = false
@@ -133,8 +152,8 @@ function activateAnchorRoute(
   if (loadDesktopAnchorTopologyState().role === 'anchor' && !requireSyncBeforeDemote) {
     return Promise.resolve(false);
   }
-  const route = routeFromTarget(group, target);
-  if (!route) return Promise.resolve(false);
+  const route = await runWithDatabaseConnectionOwner(() => routeFromTarget(group, target));
+  if (!route) return false;
   saveDesktopSyncGroupRoute(route);
   updateDesktopSyncFreshness(true);
   const active = inFlight.get(target.peerDeviceId);

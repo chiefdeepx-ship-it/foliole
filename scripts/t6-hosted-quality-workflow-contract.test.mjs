@@ -104,8 +104,8 @@ describe('T6 hosted quality workflow contracts', () => {
       'desktop-admission', 'android-quality', 'ios-quality'
     ]);
     expect(Object.keys(workflows.full.jobs)).toEqual([
-      'desktop-build', 'android-web-build', 'windows-acceptance', 'android-host',
-      'ios-full', 'full-admission'
+      'desktop-build', 'android-web-build', 'windows-acceptance',
+      'linux-responsiveness', 'android-host', 'ios-full', 'full-admission'
     ]);
     expect(workflows.ios.jobs.contract.env.FOLIOLE_IOS_RESOURCE_MODE).toBe('full');
     const portableMatrix = workflows.portableDomain.jobs['portable-domain-tests'].strategy.matrix.include;
@@ -171,8 +171,11 @@ describe('T6 hosted quality workflow contracts', () => {
   it('keeps full admission focused on heavy jobs after T5 owns portable quality', () => {
     const gate = workflows.full.jobs['full-admission'];
     expect(gate.needs).toEqual([
-      'desktop-build', 'android-web-build', 'windows-acceptance', 'android-host', 'ios-full'
+      'desktop-build', 'android-web-build', 'windows-acceptance',
+      'linux-responsiveness', 'android-host', 'ios-full'
     ]);
+    expect(gate.steps[0].env.LINUX_RESPONSIVENESS_RESULT)
+      .toBe('${{ needs.linux-responsiveness.result }}');
     expect(gate.steps[0].env.PORTABLE_RESULT).toBeUndefined();
     expect(gate.steps[0].env.PORTABLE_SHA).toBeUndefined();
   });

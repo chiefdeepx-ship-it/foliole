@@ -48,7 +48,7 @@ const payloadPlans = [
     WHERE s.object_type = 'view_state' AND s.object_id NOT LIKE '%:active_node'` },
   { objectType: 'watched_folder', sql: `SELECT b.binding_id __object_id, b.binding_id,
     s.host_name, s.host_platform, b.owner_device_identity_key, b.connection_status, b.action_mode,
-    b.highlight_mode, b.created_at, b.updated_at, b.source_ref
+    b.highlight_mode, b.reported_path, b.created_at, b.updated_at, b.source_ref
     FROM source.watched_folder_bindings b JOIN source.desktop_sources s ON s.source_ref = b.source_ref` }
 ] as const;
 
@@ -89,7 +89,10 @@ export const ANDROID_SYNC_PACK_PROVIDER_DEFINITIONS = {
     `INSERT INTO node_sync_versions SELECT v.version_id, v.object_id, v.parent_version_id, v.host_name,
        v.created_at, v.content_hash, v.body_text, v.snapshot_json
      FROM source.node_sync_versions v JOIN nodes n
-       ON n.id = v.object_id AND n.current_version_id = v.version_id`,
+     ON n.id = v.object_id AND n.current_version_id = v.version_id`,
+    `INSERT INTO node_sync_tombstones SELECT t.node_id, t.version_id, t.parent_version_id,
+       t.host_name, t.content_hash, t.snapshot_json, t.deleted_at, t.created_at
+     FROM source.node_sync_tombstones t`,
     `INSERT INTO node_sync_version_parents SELECT p.version_id, p.parent_version_id, p.ordinal
      FROM source.node_sync_version_parents p
      WHERE p.version_id IN (SELECT version_id FROM node_sync_versions)

@@ -3,6 +3,7 @@ import {
   SYNC_PACK_NODE_COLUMNS,
   type SyncPackNodeColumn
 } from './syncPackNodeFields.js';
+import { readwiseOwnerEpochFilter } from './syncPackReadwiseOwnerFilter.js';
 
 export interface SyncPackApplyableRowsOptions {
   excludedNodeIds?: readonly string[] | undefined;
@@ -56,17 +57,21 @@ function acceptedDeliveryFilter(options: SyncPackApplyableRowsOptions) {
 
 export function buildSyncPackApplyableRowsSql(options: SyncPackApplyableRowsOptions = {}) {
   const alias = incomingAlias(options);
+  const ownerEpochFilter = options.objectType && options.objectType !== 'setting'
+    ? '0' : readwiseOwnerEpochFilter(alias);
   return `(SELECT incoming.object_type, incoming.object_id, incoming.state_seq, incoming.content_hash, ` +
     `incoming.last_modified_by_host_name, incoming.updated_at, incoming.deleted_at ` +
     `FROM ${alias}.sync_object_state incoming ` +
     `LEFT JOIN main.sync_object_state current ON current.object_type = incoming.object_type ` +
     `AND current.object_id = incoming.object_id WHERE ` +
-    `(current.object_id IS NULL OR incoming.object_type IN ('node', 'node_reading', 'node_review', 'view_state') OR (` +
+    `(current.object_id IS NULL OR (${ownerEpochFilter}) OR (` +
+    `incoming.object_type <> 'setting' OR incoming.object_id <> 'user_space:windows:desktop:*:readwise_active_host'` +
+    `) AND (incoming.object_type IN ('node', 'node_reading', 'node_review', 'view_state') OR (` +
     `(current.updated_at < incoming.updated_at OR (current.updated_at = incoming.updated_at ` +
     `AND (current.content_hash < incoming.content_hash OR (current.content_hash = incoming.content_hash ` +
     `AND incoming.deleted_at IS NOT NULL)))) ` +
     `AND (current.sync_dirty <> 1 OR ` +
-    `${acceptedDeliveryFilter(options)})))` +
+    `${acceptedDeliveryFilter(options)}))))` +
     ` AND (incoming.object_type <> 'node' OR incoming.deleted_at IS NOT NULL OR EXISTS (` +
     `SELECT 1 FROM ${alias}.nodes node_payload WHERE node_payload.id = incoming.object_id))` +
     typeFilter(options.objectType) +
@@ -82,19 +87,13 @@ export function buildSyncPackNodeUpsertSql(options: SyncPackNodeApplyOptions = {
     objectType: 'node',
     sourcePeerId: options.sourcePeerId
   });
-  return `WITH RECURSIVE applyable_node_ids(id) AS (` +
-    `SELECT object_id FROM ${applyableRowsSql}` +
-    `), node_depth(id, depth) AS (` +
-    `SELECT incoming.id, 0 FROM ${alias}.nodes incoming WHERE incoming.id IN (SELECT id FROM applyable_node_ids) ` +
-    `AND (incoming.parent_id IS NULL OR EXISTS (SELECT 1 FROM main.nodes parent WHERE parent.id = incoming.parent_id)) ` +
-    `UNION SELECT child.id, parent.depth + 1 FROM ${alias}.nodes child ` +
-    `INNER JOIN node_depth parent ON parent.id = child.parent_id ` +
-    `WHERE child.id IN (SELECT id FROM applyable_node_ids)` +
-    `) INSERT INTO main.nodes (${SYNC_PACK_NODE_COLUMNS.join(', ')}) ` +
+  return `INSERT INTO main.nodes (${SYNC_PACK_NODE_COLUMNS.join(', ')}) ` +
     `SELECT ${SYNC_PACK_NODE_COLUMNS.map((column) => incomingNodeColumnExpression(column, options)).join(', ')} ` +
     `FROM ${alias}.nodes incoming ` +
-    `INNER JOIN (SELECT id, MIN(depth) AS depth FROM node_depth GROUP BY id) sorted ON sorted.id = incoming.id ` +
-    `WHERE true ORDER BY sorted.depth ASC, incoming.updated_at ASC, incoming.id ASC ` +
+    `INNER JOIN json_each(?) sorted ON sorted.value = incoming.id ` +
+    `WHERE NOT EXISTS (SELECT 1 FROM main.node_sync_tombstones tomb WHERE tomb.node_id = incoming.id) ` +
+    `AND incoming.id IN (SELECT object_id FROM ${applyableRowsSql}) ` +
+    `ORDER BY CAST(sorted.key AS INTEGER) ` +
     (options.preserveExistingNodes
       ? 'ON CONFLICT(id) DO NOTHING'
       : `ON CONFLICT(id) DO UPDATE SET ${SYNC_PACK_NODE_UPDATE_COLUMNS.map((column) => `${column} = excluded.${column}`).join(', ')}`);

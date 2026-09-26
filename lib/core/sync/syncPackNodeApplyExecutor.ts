@@ -1,13 +1,11 @@
-import { CORE_INDEX_SCHEMA_STATEMENTS } from '../database/coreIndexSchemaStatements.js';
-
 import type { DbPort } from './dbPort.js';
+import { restoreMissingIncomingNodeOrder, restoreMissingNodeOrderFromCurrentVersions } from './syncNodeOrderRecovery.js';
 import { pruneLearningRowsWithoutVisibleNodes } from './syncNodeVisibilityPruning.js';
 import {
   buildSyncPackNodeAttachmentDeleteSql,
   buildSyncPackNodeAttachmentInsertSql,
   buildSyncPackNodeOrderDeleteSql,
   buildSyncPackNodeOrderUpsertSql,
-  buildSyncPackNodeUpsertSql,
   type SyncPackNodeApplyOptions
 } from './syncPackApplyStatements.js';
 import { applySyncPackAttachmentObjectsWithDbPort } from './syncPackAttachmentObjectsExecutor.js';
@@ -17,6 +15,8 @@ import { applySyncPackExternalDocumentsWithDbPort } from './syncPackExternalDocu
 import { applySyncPackGroupFactsWithDbPort } from './syncPackGroupFactsExecutor.js';
 import { applySyncPackLearningObjectsWithDbPort } from './syncPackLearningObjectsExecutor.js';
 import { applySyncPackVersionedNodesWithDbPort } from './syncPackNodeConvergence.js';
+import { applySyncPackNodeRowsWithDbPort } from './syncPackNodeRowsApply.js';
+import { applySyncPackNodeTombstonesWithDbPort } from './syncPackNodeTombstoneExecutor.js';
 import { applySyncPackNodeVersionsWithDbPort } from './syncPackNodeVersionApplyExecutor.js';
 import { clearConfirmedSyncPackPushAcks } from './syncPackPushAckClear.js';
 import { applySyncPackReviewLogWithDbPort } from './syncPackReviewLogExecutor.js';
@@ -33,6 +33,7 @@ import { applySyncPackViewStateObjectsWithDbPort } from './syncPackViewStateObje
 export interface SyncPackNodeSurfaceApplyOptions extends SyncPackNodeApplyOptions {
   currentCursor: number;
   hostName: string;
+  onSettingApplied?: (port: DbPort, record: import('./syncPackSyncObjectsExecutor.js').SyncPackSyncObjectRecord) => Promise<void>;
   sourceHostName?: string;
   sourcePeerId?: string;
 }
@@ -53,60 +54,6 @@ async function applySyncPackNodeOrderRowsWithDbPort(
 ) {
   await port.run(buildSyncPackNodeOrderDeleteSql(options));
   await port.run(buildSyncPackNodeOrderUpsertSql(options));
-}
-
-async function applySyncPackNodeRowsWithDbPort(
-  port: DbPort,
-  options: SyncPackNodeApplyOptions = {}
-) {
-  const resolvedOptions = await resolveSyncPackNodeApplyOptions(port, options);
-  await ensureSyncPackSpecialRootParents(port, options.incomingAlias);
-  await dropNodeIndexes(port);
-  try {
-    await port.run(buildSyncPackNodeUpsertSql(resolvedOptions));
-  } finally {
-    await createNodeIndexes(port);
-  }
-}
-
-async function resolveSyncPackNodeApplyOptions(
-  port: DbPort,
-  options: SyncPackNodeApplyOptions
-): Promise<SyncPackNodeApplyOptions> {
-  if (options.incomingNodeColumns !== undefined) return options;
-  return {
-    ...options,
-    incomingNodeColumns: await loadIncomingNodeColumns(port, options.incomingAlias ?? 'inc')
-  };
-}
-
-async function loadIncomingNodeColumns(port: DbPort, alias: string) {
-  const schemaName = alias.replaceAll('"', '""');
-  const rows = await port.query<{ name: unknown }>(`PRAGMA "${schemaName}".table_info(nodes)`);
-  return rows.map((row) => row.name).filter((name): name is string => typeof name === 'string');
-}
-
-const NODE_INDEX_NAMES = [
-  'idx_nodes_parent_id',
-  'idx_nodes_dirty_or_unversioned_updated',
-  'idx_nodes_deleted_at',
-  'idx_nodes_body_blob_hash'
-] as const;
-
-const NODE_INDEX_SCHEMA_STATEMENTS = CORE_INDEX_SCHEMA_STATEMENTS.filter((statement) => (
-  NODE_INDEX_NAMES.some((indexName) => statement.includes(indexName))
-));
-
-async function dropNodeIndexes(port: DbPort) {
-  for (const indexName of NODE_INDEX_NAMES) {
-    await port.run(`DROP INDEX IF EXISTS ${indexName}`);
-  }
-}
-
-async function createNodeIndexes(port: DbPort) {
-  for (const statement of NODE_INDEX_SCHEMA_STATEMENTS) {
-    await port.run(statement);
-  }
 }
 
 async function applySyncPackNodeAttachmentsWithDbPort(
@@ -131,6 +78,7 @@ export async function applySyncPackNodeSurfaceWithDbPort(
   ) : [];
   return {
     applied: shouldApply,
+    appliedTombstoneNodeIds: result.appliedTombstoneNodeIds,
     participatingArticleIds: articles.map((row) => row.object_id),
     appliedBlobCount: result.appliedBlobCount,
     appliedGroupFactCount: result.appliedGroupFactCount,
@@ -149,14 +97,7 @@ async function applySyncPackSurfaceInTransaction(
   toStateSeq: number
 ) {
   if (!shouldApply) {
-    await clearConfirmedSyncPackPushAcks(port, options, toStateSeq);
-    return {
-      appliedBlobCount: 0,
-      appliedGroupFactCount: 0,
-      appliedObjectCount: 0,
-      appliedReviewOpIds: [] as string[],
-      handledConflictCount: 0
-    };
+    return applyReplayPackTombstones(port, options, toStateSeq);
   }
   const applyOptions = options;
   const groupFacts = await applySyncPackGroupFactsWithDbPort(port, {
@@ -164,6 +105,7 @@ async function applySyncPackSurfaceInTransaction(
     sourcePeerId: options.sourcePeerId ?? options.sourceHostName!
   });
   const appliedBlobCount = await applySyncPackContentBlobsWithDbPort(port, applyOptions);
+  const appliedTombstoneNodeIds = await applySyncPackNodeTombstonesWithDbPort(port, options.incomingAlias);
   const nodeConvergence = await applyVersionedNodeStage(port, options);
   const remainingNodeOptions = {
     ...applyOptions,
@@ -171,6 +113,8 @@ async function applySyncPackSurfaceInTransaction(
   };
   await applySyncPackNodeRowsWithDbPort(port, remainingNodeOptions);
   await applySyncPackNodeOrderRowsWithDbPort(port, remainingNodeOptions);
+  await restoreMissingNodeOrderFromCurrentVersions(port);
+  await restoreMissingIncomingNodeOrder(port, options.incomingAlias);
   await pruneLearningRowsWithoutVisibleNodes(port);
   await applySyncPackExternalDocumentsWithDbPort(port, options);
   await applySyncPackSettingObjectsWithDbPort(port, options);
@@ -197,7 +141,26 @@ async function applySyncPackSurfaceInTransaction(
     appliedGroupFactCount: groupFacts.appliedFactCount,
     appliedObjectCount: appliedObjectCount + nodeConvergence.appliedNodeCount,
     appliedReviewOpIds,
-    handledConflictCount: nodeConvergence.handledConflictCount
+    handledConflictCount: nodeConvergence.handledConflictCount,
+    appliedTombstoneNodeIds
+  };
+}
+
+async function applyReplayPackTombstones(
+  port: DbPort,
+  options: SyncPackNodeSurfaceApplyOptions,
+  toStateSeq: number
+) {
+  const appliedTombstoneNodeIds = await applySyncPackNodeTombstonesWithDbPort(port, options.incomingAlias);
+  await restoreMissingNodeOrderFromCurrentVersions(port);
+  await clearConfirmedSyncPackPushAcks(port, options, toStateSeq);
+  return {
+    appliedBlobCount: 0,
+    appliedGroupFactCount: 0,
+    appliedObjectCount: 0,
+    appliedReviewOpIds: [] as string[],
+    handledConflictCount: 0,
+    appliedTombstoneNodeIds
   };
 }
 

@@ -12,7 +12,14 @@ export interface NativeReadwiseHostAssignment {
   hosts: NativeReadwiseWorkgroupHost[];
   is_active: boolean;
   legacy_unassigned: boolean;
+  handoff_pending: boolean;
   activation_blocked_reason:
     | 'handoff-required' | 'handoff-in-progress' | 'group-quiescence-required'
     | 'connection-unavailable' | 'guard-unavailable' | 'guard-history' | null;
+}
+
+export interface NativeReadwiseJoinDecision {
+  kind: 'none' | 'waiting' | 'choose' | 'switching';
+  devices: Array<{ device_id: string; device_name: string }>;
+  reason?: string;
 }
